@@ -10,7 +10,7 @@ from database import (init_database, get_services, get_service_by_id,
                       get_booked_times, create_booking, get_customer_bookings,
                       get_bookings, update_booking_status, SLOTS)
 
-st.set_page_config(page_title="LocalServe", page_icon="📅", layout="wide")
+st.set_page_config(page_title="LocalServe",layout="wide")
 init_database()
 
 # ---------- Styling ----------
@@ -170,7 +170,7 @@ def show_cards(services, prefix, show_description=False):
 
 
 # ---------- Sidebar ----------
-st.sidebar.title("📅 LocalServe")
+st.sidebar.title(" LocalServe")
 st.sidebar.caption("Book local services. Pick your time. Get it done.")
 st.sidebar.radio("Go to", PAGES, key="page")
 page = st.session_state.page
@@ -180,7 +180,7 @@ page = st.session_state.page
 def show_home():
     st.markdown("""
     <div class="hero">
-        <div class="hero-title">📅 LocalServe</div>
+        <div class="hero-title"> LocalServe</div>
         <div class="hero-tag">Book local services. Pick your time. Get it done.</div>
         <div class="hero-text">Find trusted local services, check available
         slots, and book appointments in minutes.</div>
