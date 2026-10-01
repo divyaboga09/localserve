@@ -6,6 +6,7 @@ from google import genai
 
 import pandas as pd
 import streamlit as st
+import time
 
 from database import (init_database, get_services, get_service_by_id,
                       add_service, delete_service,
@@ -809,9 +810,14 @@ elif page == "My Bookings":
 elif page == "Admin Dashboard":
     show_admin()
 # --- Gemini AI Feature ---
+GEMINI_MODEL = "gemini-3.8-flash"
+
 st.subheader("LocalServe AI Assistant")
 
-api_key = st.secrets.get("GEMINI_API_KEY")
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    api_key = None
 
 if api_key:
     client = genai.Client(api_key=api_key)
@@ -820,14 +826,20 @@ if api_key:
 
     if st.button("Ask AI") and user_query:
         with st.spinner("Generating answer..."):
-            try:
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=user_query,
-                )
-                st.success("Response:")
-                st.write(response.text)
-            except Exception as e:
-                st.error(f"Error: {e}")
+            for attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=GEMINI_MODEL,
+                        contents=user_query,
+                    )
+                    st.success("Response:")
+                    st.write(response.text)
+                    break
+                except Exception as e:
+                    if "503" in str(e) and attempt < 2:
+                        time.sleep(2)
+                        continue
+                    st.error(f"Error: {e}")
+                    break
 else:
-    st.warning("Gemini API key is not configured in Streamlit Secrets.")
+    st.warning("Gemini API key is missing. Please check your secrets configuration.")
