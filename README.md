@@ -2,19 +2,20 @@
 
 **Book local services. Pick your time. Get it done.**
 
+**Live demo:** https://localserve-bydivyasrinivas.streamlit.app
+
 LocalServe is a lightweight local service booking system for small providers such as salons, tutors, repair shops, photographers, cleaners, and fitness trainers. Its main feature is real-time available time-slot management: customers can only select slots that are actually free.
 
 ## Features
 
+- Customer sign-up and login (passwords stored as salted hashes)
 - Service browsing with category filters
-- Provider selection, prices, and durations
 - Real-time available slots (no double bookings)
-- Customer booking with a unique booking ID
-- Booking tracking by phone number
-- Admin dashboard with booking statistics
+- Booking with a unique booking ID
+- My Bookings page showing only the logged-in customer's bookings
+- Admin dashboard with statistics, customer list, and analytics
 - Booking status management (Confirm, Reject, Complete)
 - Service management (add and delete services)
-- Basic analytics with charts
 
 ## Technologies
 
@@ -33,20 +34,18 @@ LocalServe is a lightweight local service booking system for small providers suc
 
        streamlit run app.py
 
-The database (`localserve.db`) and sample services are created automatically on the first run.
+The database and sample services are created automatically on the first run.
 
 ## Admin Login
 
-- Username: `admin`
-- Password: `admin123`
-
-(Demo credentials for a college project only.)
+For local use, the demo login is `admin` / `admin123`.
+The hosted version uses private credentials set in Streamlit secrets.
 
 ## Project Structure
 
     localserve/
     ├── app.py             # Streamlit pages and UI
-    ├── database.py        # SQLite functions
+    ├── database.py        # SQLite and password functions
     ├── requirements.txt
     ├── README.md
     └── assets/

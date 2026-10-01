@@ -1,7 +1,11 @@
 # database.py - all SQLite code lives here
+import hashlib
+import hmac
+import os
 import sqlite3
 
 DB_NAME = "localserve.db"
+HASH_ROUNDS = 600_000  # how many times a password is scrambled
 
 # Time slots every provider offers each day
 SLOTS = ["10:00 AM", "11:00 AM", "12:00 PM", "02:00 PM",
@@ -30,6 +34,8 @@ def init_database():
             role TEXT
         )
     """)
+    # Two accounts can never share one email
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS services (
@@ -57,9 +63,15 @@ def init_database():
             booking_time TEXT,
             price INTEGER,
             status TEXT DEFAULT 'Pending',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER
         )
     """)
+
+    # Older databases don't have user_id yet, so add it
+    columns = [r["name"] for r in cur.execute("PRAGMA table_info(bookings)")]
+    if "user_id" not in columns:
+        cur.execute("ALTER TABLE bookings ADD COLUMN user_id INTEGER")
 
     # Add sample services only if the table is empty
     count = cur.execute("SELECT COUNT(*) FROM services").fetchone()[0]
@@ -88,6 +100,67 @@ def init_database():
     conn.close()
 
 
+# ---------- Users and passwords ----------
+def hash_password(password):
+    """Scramble a password with a random salt. Returns 'salt$hash' text."""
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                 salt, HASH_ROUNDS)
+    return salt.hex() + "$" + digest.hex()
+
+
+def verify_password(password, stored):
+    """Check a typed password against the stored 'salt$hash' text."""
+    try:
+        salt_hex, hash_hex = stored.split("$")
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                     bytes.fromhex(salt_hex), HASH_ROUNDS)
+        return hmac.compare_digest(digest.hex(), hash_hex)
+    except (ValueError, AttributeError):
+        return False
+
+
+def create_user(name, email, phone, password):
+    """Create a customer account. Returns the new user id, or None if the
+    email is already used."""
+    conn = get_connection()
+    try:
+        cur = conn.execute("""
+            INSERT INTO users (name, email, phone, password, role)
+            VALUES (?, ?, ?, ?, 'customer')
+        """, (name, email.lower(), phone, hash_password(password)))
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+
+def authenticate_user(email, password):
+    """Return the user row if email and password are correct, else None."""
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM users WHERE email = ? AND role = 'customer'",
+                       (email.lower(),)).fetchone()
+    conn.close()
+    if row is None:
+        hash_password(password)  # same waiting time whether or not the email exists
+        return None
+    return row if verify_password(password, row["password"]) else None
+
+
+def get_customers():
+    """Return customers for the admin. The password is NOT included."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT id, name, email, phone FROM users
+        WHERE role = 'customer' ORDER BY id DESC
+    """).fetchall()
+    conn.close()
+    return rows
+
+
+# ---------- Services ----------
 def get_services():
     """Return all services as a list of rows."""
     conn = get_connection()
@@ -126,6 +199,7 @@ def delete_service(service_id):
     conn.close()
 
 
+# ---------- Bookings ----------
 def get_booked_times(provider_name, booking_date):
     """Return the times already taken for this provider on this date.
     Rejected bookings free up their slot again."""
@@ -143,7 +217,8 @@ def is_slot_available(provider_name, booking_date, booking_time):
     return booking_time not in get_booked_times(provider_name, booking_date)
 
 
-def create_booking(name, phone, email, service, booking_date, booking_time):
+def create_booking(name, phone, email, service, booking_date, booking_time,
+                   user_id=None):
     """Save a booking. Returns the booking code, or None if the slot is taken."""
     # Safety check: the slot must still be free
     if not is_slot_available(service["provider_name"], booking_date, booking_time):
@@ -159,24 +234,24 @@ def create_booking(name, phone, email, service, booking_date, booking_time):
         INSERT INTO bookings
         (booking_code, customer_name, customer_phone, customer_email,
          service_id, service_name, provider_name, booking_date,
-         booking_time, price, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')
+         booking_time, price, status, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)
     """, (code, name, phone, email, service["id"], service["service_name"],
           service["provider_name"], booking_date, booking_time,
-          service["price"]))
+          service["price"], user_id))
     conn.commit()
     conn.close()
     return code
 
 
-def get_customer_bookings(phone):
-    """Return all bookings for one phone number, newest first."""
+def get_user_bookings(user_id):
+    """Return the bookings of ONE logged-in customer, newest first."""
     conn = get_connection()
     rows = conn.execute("""
         SELECT * FROM bookings
-        WHERE customer_phone = ?
+        WHERE user_id = ?
         ORDER BY booking_date DESC, id DESC
-    """, (phone,)).fetchall()
+    """, (user_id,)).fetchall()
     conn.close()
     return rows
 

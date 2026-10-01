@@ -1,3 +1,4 @@
+import hmac
 import html
 import re
 from datetime import date, datetime
@@ -7,10 +8,11 @@ import streamlit as st
 
 from database import (init_database, get_services, get_service_by_id,
                       add_service, delete_service,
-                      get_booked_times, create_booking, get_customer_bookings,
-                      get_bookings, update_booking_status, SLOTS)
+                      get_booked_times, create_booking, get_user_bookings,
+                      get_bookings, update_booking_status,
+                      create_user, authenticate_user, get_customers, SLOTS)
 
-st.set_page_config(page_title="LocalServe",layout="wide")
+st.set_page_config(page_title="LocalServe", layout="wide")
 init_database()
 
 # ---------- Styling ----------
@@ -24,6 +26,16 @@ st.markdown("""
 /* Sidebar */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #EFF6FF, #DBEAFE);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] {gap: 4px;}
+section[data-testid="stSidebar"] div[role="radiogroup"] label {
+    padding: 10px 12px; border-radius: 10px; width: 100%;
+    transition: background 0.15s;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {background: #BFDBFE;}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+    background: #FFFFFF; font-weight: 700;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.15);
 }
 
 /* Cards */
@@ -99,11 +111,15 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-PAGES = ["Home", "Services", "Book a Service", "My Bookings", "Admin Dashboard"]
-
-# Demo admin login (fine for a college project)
-ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
+# Menu names shown in the sidebar
+LABELS = {
+    "Home": "🏠  Home",
+    "Services": "🛎️  Services",
+    "Login": "🔐  Login / Sign Up",
+    "Book a Service": "🕒  Book a Service",
+    "My Bookings": "🧾  My Bookings",
+    "Admin Dashboard": "⚙️  Admin Dashboard",
+}
 
 # Colour and icon for each category (unknown categories get the default)
 CATEGORY_COLORS = {
@@ -115,17 +131,86 @@ CATEGORY_ICONS = {
     "Tutoring": "📚", "Photography": "📷", "Fitness Training": "🏋️",
 }
 
-# Remember which page is open, and whether admin is logged in
+# What the app remembers while the browser tab is open
 if "page" not in st.session_state:
     st.session_state.page = "Home"
+if "user" not in st.session_state:
+    st.session_state.user = None            # the logged-in customer, or None
 if "admin_logged_in" not in st.session_state:
     st.session_state.admin_logged_in = False
 
 
-def go_to_booking(service_id):
-    """Called when a Book Now button is clicked."""
-    st.session_state.booking_service = service_id
-    st.session_state.page = "Book a Service"
+# ---------- Small helpers ----------
+def get_admin_login():
+    """Admin login from Streamlit secrets if they exist, else the demo login."""
+    try:
+        return st.secrets["ADMIN_USER"], st.secrets["ADMIN_PASS"]
+    except Exception:
+        return "admin", "divya123"
+
+
+def menu_pages():
+    """Which menu items the current visitor should see."""
+    if st.session_state.admin_logged_in:
+        return ["Home", "Services", "Admin Dashboard"]
+    if st.session_state.user:
+        return ["Home", "Services", "Book a Service", "My Bookings"]
+    return ["Home", "Services", "Login"]
+
+
+def go_to_booking(service_id=None):
+    """Called by Book Now buttons. Guests are sent to the login page first."""
+    if st.session_state.user:
+        if service_id:
+            st.session_state.booking_service = service_id
+        st.session_state.page = "Book a Service"
+    else:
+        if service_id:
+            st.session_state.pending_service = service_id
+        st.session_state.login_notice = "Please log in or sign up to book a service."
+        st.session_state.page = "Login"
+
+
+def logout():
+    st.session_state.user = None
+    st.session_state.admin_logged_in = False
+    st.session_state.pop("confirmation", None)
+    st.session_state.pop("pending_service", None)
+    st.session_state.page = "Home"
+
+
+def start_session(user):
+    """Log a customer in. Only safe details are kept (never the password)."""
+    st.session_state.user = {"id": user["id"], "name": user["name"],
+                             "email": user["email"], "phone": user["phone"]}
+    st.session_state.admin_logged_in = False
+    pending = st.session_state.pop("pending_service", None)
+    if pending:                              # they clicked Book Now before logging in
+        st.session_state.booking_service = pending
+        st.session_state.next_page = "Book a Service"
+    else:
+        st.session_state.next_page = "Home"
+    st.rerun()
+
+
+def clean_phone(text):
+    """Return a 10-digit phone number, or None if invalid."""
+    digits = re.sub(r"[\s\-]", "", text)
+    if digits.startswith("+91"):
+        digits = digits[3:]
+    if re.fullmatch(r"[6-9]\d{9}", digits):
+        return digits
+    return None
+
+
+def is_valid_email(text):
+    return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text) is not None
+
+
+def is_strong_password(text):
+    """At least 8 characters, with a letter and a number."""
+    return (len(text) >= 8 and re.search(r"[A-Za-z]", text) is not None
+            and re.search(r"\d", text) is not None)
 
 
 def style_status(df):
@@ -156,8 +241,9 @@ def service_card(s, prefix, show_description=False):
             f'<div class="price">₹{s["price"]:,} '
             f'<span>· ⏱️ {s["duration"]} min</span></div>',
             unsafe_allow_html=True)
-        st.button("Book Now", key=f"{prefix}_{s['id']}",
-                  on_click=go_to_booking, args=(s["id"],))
+        if not st.session_state.admin_logged_in:
+            st.button("Book Now", key=f"{prefix}_{s['id']}",
+                      on_click=go_to_booking, args=(s["id"],))
 
 
 def show_cards(services, prefix, show_description=False):
@@ -170,9 +256,33 @@ def show_cards(services, prefix, show_description=False):
 
 
 # ---------- Sidebar ----------
-st.sidebar.title(" LocalServe")
+# A page change requested by login/signup is applied before the menu is drawn
+if "next_page" in st.session_state:
+    st.session_state.page = st.session_state.pop("next_page")
+
+options = menu_pages()
+if st.session_state.page not in options:
+    st.session_state.page = "Home"
+
+st.sidebar.title("LocalServe")
 st.sidebar.caption("Book local services. Pick your time. Get it done.")
-st.sidebar.radio("Go to", PAGES, key="page")
+
+if st.session_state.admin_logged_in:
+    st.sidebar.markdown("🛠️ **Admin**")
+elif st.session_state.user:
+    st.sidebar.markdown(f"👤 **{st.session_state.user['name']}**")
+    st.sidebar.caption(st.session_state.user["email"])
+else:
+    st.sidebar.caption("You are browsing as a guest.")
+
+st.sidebar.divider()
+st.sidebar.radio("Menu", options, key="page",
+                 format_func=lambda p: LABELS[p], label_visibility="collapsed")
+
+if st.session_state.admin_logged_in or st.session_state.user:
+    st.sidebar.divider()
+    st.sidebar.button("Log out", on_click=logout)
+
 page = st.session_state.page
 
 
@@ -180,7 +290,7 @@ page = st.session_state.page
 def show_home():
     st.markdown("""
     <div class="hero">
-        <div class="hero-title"> LocalServe</div>
+        <div class="hero-title">LocalServe</div>
         <div class="hero-tag">Book local services. Pick your time. Get it done.</div>
         <div class="hero-text">Find trusted local services, check available
         slots, and book appointments in minutes.</div>
@@ -191,8 +301,10 @@ def show_home():
         <span>🎫 Instant booking ID</span>
     </div>
     """, unsafe_allow_html=True)
-    st.button("Book a Service", type="primary",
-              on_click=lambda: st.session_state.update(page="Book a Service"))
+    if not st.session_state.admin_logged_in:
+        st.button("Book a Service", type="primary", on_click=go_to_booking)
+        if not st.session_state.user:
+            st.caption("Create a free account or log in to book.")
 
     st.divider()
     st.header("Popular Services")
@@ -234,21 +346,90 @@ def show_services():
     show_cards(services, "svc", show_description=True)
 
 
-# ---------- Booking helpers ----------
-def clean_phone(text):
-    """Return a 10-digit phone number, or None if invalid."""
-    digits = re.sub(r"[\s\-]", "", text)
-    if digits.startswith("+91"):
-        digits = digits[3:]
-    if re.fullmatch(r"[6-9]\d{9}", digits):
-        return digits
-    return None
+# ---------- Login / Sign up ----------
+def show_login():
+    st.title("Welcome to LocalServe")
+
+    notice = st.session_state.pop("login_notice", None)
+    if notice:
+        st.info(notice)
+
+    tab_login, tab_signup, tab_admin = st.tabs(["Log In", "Sign Up", "Admin"])
+
+    # ----- Customer login -----
+    with tab_login:
+        with st.form("customer_login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            go = st.form_submit_button("Log In", type="primary")
+        if go:
+            if not email.strip() or not password:
+                st.error("Please fill in all required fields.")
+            else:
+                user = authenticate_user(email.strip(), password)
+                if user is None:
+                    st.error("Incorrect email or password.")
+                else:
+                    start_session(user)
+
+    # ----- Customer sign up -----
+    with tab_signup:
+        with st.form("signup_form"):
+            name = st.text_input("Full Name")
+            new_email = st.text_input("Email", key="signup_email")
+            phone = st.text_input("Phone Number")
+            new_password = st.text_input("Password (8+ characters, letters and numbers)",
+                                         type="password", key="signup_password")
+            confirm_password = st.text_input("Confirm Password", type="password")
+            signup = st.form_submit_button("Create Account", type="primary")
+        if signup:
+            if not (name.strip() and new_email.strip() and phone.strip()
+                    and new_password and confirm_password):
+                st.error("Please fill in all required fields.")
+            elif not is_valid_email(new_email.strip()):
+                st.error("Please enter a valid email address.")
+            elif clean_phone(phone.strip()) is None:
+                st.error("Please enter a valid phone number.")
+            elif not is_strong_password(new_password):
+                st.error("Password must be at least 8 characters and include "
+                         "a letter and a number.")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                digits = clean_phone(phone.strip())
+                user_id = create_user(name.strip(), new_email.strip(),
+                                      digits, new_password)
+                if user_id is None:
+                    st.error("An account with this email already exists. "
+                             "Please log in.")
+                else:
+                    start_session({"id": user_id, "name": name.strip(),
+                                   "email": new_email.strip().lower(),
+                                   "phone": digits})
+
+    # ----- Admin login -----
+    with tab_admin:
+        with st.form("admin_login_form"):
+            username = st.text_input("Admin Username")
+            admin_password = st.text_input("Admin Password", type="password")
+            admin_go = st.form_submit_button("Admin Login", type="primary")
+        if admin_go:
+            if not username.strip() or not admin_password:
+                st.error("Please fill in all required fields.")
+            else:
+                admin_user, admin_pass = get_admin_login()
+                ok = (hmac.compare_digest(username.strip().encode(), admin_user.encode())
+                      and hmac.compare_digest(admin_password.encode(), admin_pass.encode()))
+                if ok:
+                    st.session_state.admin_logged_in = True
+                    st.session_state.user = None
+                    st.session_state.next_page = "Admin Dashboard"
+                    st.rerun()
+                else:
+                    st.error("Incorrect username or password.")
 
 
-def is_valid_email(text):
-    return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text) is not None
-
-
+# ---------- Book a Service ----------
 def available_slots(provider, chosen_date):
     """All slots minus booked ones (and minus past times if today)."""
     booked = get_booked_times(provider, str(chosen_date))
@@ -273,8 +454,7 @@ def show_confirmation():
         f"**Price:** ₹{b['price']:,}  \n"
         "**Status:** Pending"
     )
-    st.info("Save your Booking ID. You can track it in My Bookings "
-            "using your phone number.")
+    st.info("Save your Booking ID. You can track it anytime in My Bookings.")
 
     def clear():
         del st.session_state["confirmation"]
@@ -282,9 +462,12 @@ def show_confirmation():
     st.button("Make another booking", on_click=clear)
 
 
-# ---------- Book a Service ----------
 def show_booking():
     st.title("Book a Service")
+    user = st.session_state.user
+    if user is None:
+        st.warning("Please log in to book a service.")
+        return
 
     if "confirmation" in st.session_state:
         show_confirmation()
@@ -328,11 +511,11 @@ def show_booking():
         st.caption("Already booked: " + ", ".join(booked))
 
     st.subheader("Your Details")
-    # A form sends all fields together when the button is clicked
+    # Filled in from your account, so you don't retype them
     with st.form("booking_form"):
-        name = st.text_input("Customer Name")
-        phone = st.text_input("Phone Number")
-        email = st.text_input("Email")
+        name = st.text_input("Customer Name", value=user["name"])
+        phone = st.text_input("Phone Number", value=user["phone"])
+        email = st.text_input("Email", value=user["email"])
         confirm = st.checkbox("I confirm that these booking details are correct.")
         submitted = st.form_submit_button("Confirm Booking", type="primary")
 
@@ -351,7 +534,8 @@ def show_booking():
             st.error("Please tick the confirmation checkbox.")
         else:
             code = create_booking(name.strip(), clean_phone(phone.strip()),
-                                  email.strip(), service, str(chosen_date), slot)
+                                  email.strip(), service, str(chosen_date), slot,
+                                  user_id=user["id"])
             if code is None:
                 st.error("This time slot is no longer available. "
                          "Please select another slot.")
@@ -370,62 +554,31 @@ def show_booking():
 # ---------- My Bookings ----------
 def show_my_bookings():
     st.title("My Bookings")
-    st.write("Enter the phone number you used while booking.")
+    user = st.session_state.user
+    if user is None:
+        st.warning("Please log in to see your bookings.")
+        return
 
-    with st.form("lookup_form"):
-        phone = st.text_input("Phone Number")
-        search = st.form_submit_button("Find My Bookings", type="primary")
+    rows = get_user_bookings(user["id"])
+    if not rows:
+        st.info("No bookings found.")
+        return
 
-    if search:
-        if not phone.strip():
-            st.error("Please fill in all required fields.")
-            return
-        digits = clean_phone(phone.strip())
-        if digits is None:
-            st.error("Please enter a valid phone number.")
-            return
+    table = pd.DataFrame([{
+        "Booking ID": r["booking_code"],
+        "Service": r["service_name"],
+        "Provider": r["provider_name"],
+        "Date": r["booking_date"],
+        "Time": r["booking_time"],
+        "Price": f"₹{r['price']:,}",
+        "Status": r["status"],
+    } for r in rows])
 
-        rows = get_customer_bookings(digits)
-        if not rows:
-            st.info("No bookings found.")
-            return
-
-        table = pd.DataFrame([{
-            "Booking ID": r["booking_code"],
-            "Service": r["service_name"],
-            "Provider": r["provider_name"],
-            "Date": r["booking_date"],
-            "Time": r["booking_time"],
-            "Price": f"₹{r['price']:,}",
-            "Status": r["status"],
-        } for r in rows])
-
-        st.success(f"{len(rows)} booking(s) found.")
-        st.dataframe(style_status(table), hide_index=True,
-                     use_container_width=True)
+    st.success(f"{len(rows)} booking(s) found.")
+    st.dataframe(style_status(table), hide_index=True, width="stretch")
 
 
 # ---------- Admin ----------
-def show_admin_login():
-    """Simple login form for the admin."""
-    st.title("Admin Login")
-    st.write("Please log in to manage bookings and services.")
-
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login = st.form_submit_button("Login", type="primary")
-
-    if login:
-        if not username.strip() or not password.strip():
-            st.error("Please fill in all required fields.")
-        elif username.strip() == ADMIN_USER and password == ADMIN_PASS:
-            st.session_state.admin_logged_in = True
-            st.rerun()
-        else:
-            st.error("Incorrect username or password.")
-
-
 def admin_bookings_tab():
     """Stats, booking table and status buttons."""
     rows = get_bookings()
@@ -462,7 +615,7 @@ def admin_bookings_tab():
         "Price": f"₹{r['price']:,}",
         "Status": r["status"],
     } for r in rows])
-    st.dataframe(style_status(table), hide_index=True, use_container_width=True)
+    st.dataframe(style_status(table), hide_index=True, width="stretch")
 
     # ----- Change status -----
     st.subheader("Manage a Booking")
@@ -545,7 +698,7 @@ def admin_services_tab():
         "Price": f"₹{s['price']:,}",
         "Duration": f"{s['duration']} min",
     } for s in services])
-    st.dataframe(table, hide_index=True, use_container_width=True)
+    st.dataframe(table, hide_index=True, width="stretch")
 
     # ----- Delete a service -----
     st.subheader("Delete a Service")
@@ -563,6 +716,20 @@ def admin_services_tab():
             st.session_state.service_message = (
                 f"Service '{by_id[delete_id]['service_name']}' deleted.")
             st.rerun()
+
+
+def admin_customers_tab():
+    """Registered customers (passwords are never shown)."""
+    rows = get_customers()
+    st.metric("Registered Customers", len(rows))
+    if not rows:
+        st.info("No customers registered yet.")
+        return
+    table = pd.DataFrame([{
+        "ID": r["id"], "Name": r["name"],
+        "Email": r["email"], "Phone": r["phone"],
+    } for r in rows])
+    st.dataframe(table, hide_index=True, width="stretch")
 
 
 def admin_analytics_tab():
@@ -595,7 +762,7 @@ def admin_analytics_tab():
     counts = df.groupby("Service").size().sort_values(ascending=False)
     st.bar_chart(counts, color="#2563EB")
     st.dataframe(counts.reset_index(name="Bookings"),
-                 hide_index=True, use_container_width=True)
+                 hide_index=True, width="stretch")
 
     # ----- Bookings by status -----
     st.subheader("Bookings by Status")
@@ -609,30 +776,22 @@ def admin_analytics_tab():
         st.bar_chart(done.groupby("Service")["Price"].sum(), color="#10B981")
 
 
-def show_admin_dashboard():
-    """Shown only after a successful login."""
+def show_admin():
     st.title("Admin Dashboard")
+    if not st.session_state.admin_logged_in:
+        st.warning("Admin access only. Please log in from the Login page.")
+        return
 
-    def logout():
-        st.session_state.admin_logged_in = False
-
-    st.button("Logout", on_click=logout)
-
-    tab1, tab2, tab3 = st.tabs(["📋 Bookings", "🛠️ Manage Services",
-                                "📊 Analytics"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Bookings", "🛠️ Manage Services",
+                                      "👥 Customers", "📊 Analytics"])
     with tab1:
         admin_bookings_tab()
     with tab2:
         admin_services_tab()
     with tab3:
+        admin_customers_tab()
+    with tab4:
         admin_analytics_tab()
-
-
-def show_admin():
-    if st.session_state.admin_logged_in:
-        show_admin_dashboard()
-    else:
-        show_admin_login()
 
 
 # ---------- Page router ----------
@@ -640,6 +799,8 @@ if page == "Home":
     show_home()
 elif page == "Services":
     show_services()
+elif page == "Login":
+    show_login()
 elif page == "Book a Service":
     show_booking()
 elif page == "My Bookings":
