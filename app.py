@@ -2,6 +2,7 @@ import hmac
 import html
 import re
 from datetime import date, datetime
+from google import genai
 
 import pandas as pd
 import streamlit as st
@@ -807,3 +808,26 @@ elif page == "My Bookings":
     show_my_bookings()
 elif page == "Admin Dashboard":
     show_admin()
+# --- Gemini AI Feature ---
+st.subheader("LocalServe AI Assistant")
+
+api_key = st.secrets.get("GEMINI_API_KEY")
+
+if api_key:
+    client = genai.Client(api_key=api_key)
+
+    user_query = st.text_input("Ask our AI assistant anything about local services:")
+
+    if st.button("Ask AI") and user_query:
+        with st.spinner("Generating answer..."):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=user_query,
+                )
+                st.success("Response:")
+                st.write(response.text)
+            except Exception as e:
+                st.error(f"Error: {e}")
+else:
+    st.warning("Gemini API key is not configured in Streamlit Secrets.")
